@@ -1,3 +1,4 @@
+# SCRIPT VERSION: 2026-08-01
 #############################
 # Project: Uncontrolled Confounding adjustment -- SUMMARY LEVEL
 # Programmer name: Richard MacLehose
@@ -6,7 +7,7 @@
 # Update: 8/12/23
 #   Changed variables to double to prevent overflow
 #
-# Update:
+# Update: 8/1/26
 #   Added Mantel-Haenszel RR, OR, and RD options
 #   Added clearer variable names
 #   Added validity checks before binomial draws
@@ -64,13 +65,14 @@ library(knitr)
 # HELPER: CHOOSE NUMBER OF HISTOGRAM BINS
 # =========================================================================
 
-choose_hist_bins <- function(n, min_bins = 30, max_bins = 120) {
+choose_hist_bins <- function(n, min_bins = 30L, max_bins = 60L) {
   
-  if (!is.numeric(n) || length(n) != 1 || is.na(n) || n < 1) {
-    stop("n must be a positive number.")
+  if (!is.numeric(n) || length(n) != 1L || is.na(n) ||
+      !is.finite(n) || n < 1) {
+    stop("n must be a positive finite number.")
   }
   
-  bins <- ceiling(2 * n^(1 / 3))
+  bins <- ceiling(n^(1 / 3))
   bins <- max(min_bins, bins)
   bins <- min(max_bins, bins)
   
@@ -1020,37 +1022,310 @@ make_pba_table <- function(eff_out, digits = 3) {
 
 
 # =========================================================================
+# PLOT THEME AND HELPERS
+# =========================================================================
+
+full_effect_name <- function(effect_measure) {
+  
+  switch(
+    effect_measure,
+    RR = "Risk ratio",
+    OR = "Odds ratio",
+    RD = "Risk difference",
+    stop("Unknown effect measure.", call. = FALSE)
+  )
+}
+
+
+format_effect <- function(x, digits = 2) {
+  
+  scales::number(
+    x,
+    accuracy = 10^(-digits),
+    trim = TRUE
+  )
+}
+
+
+theme_pba <- function(base_size = 11.5,
+                      base_family = "sans") {
+  
+  theme_minimal(
+    base_size = base_size,
+    base_family = base_family
+  ) +
+    theme(
+      text = element_text(
+        color = "grey10"
+      ),
+      plot.title.position = "plot",
+      plot.title = element_text(
+        size = 15,
+        face = "bold",
+        margin = margin(b = 6)
+      ),
+      plot.subtitle = element_text(
+        size = 10.5,
+        color = "grey35",
+        margin = margin(b = 8)
+      ),
+      axis.title = element_text(
+        size = 10.8,
+        color = "grey15"
+      ),
+      axis.text = element_text(
+        size = 9.8,
+        color = "grey25"
+      ),
+      strip.text = element_text(
+        size = 11.2,
+        face = "bold",
+        hjust = 0,
+        color = "grey10",
+        margin = margin(b = 4)
+      ),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(
+        color = "grey90",
+        linewidth = 0.35
+      ),
+      plot.margin = margin(
+        12,
+        16,
+        10,
+        12
+      )
+    )
+}
+
+
+ratio_breaks <- function(limits,
+                         max_breaks = 7L) {
+  
+  candidates <- c(
+    0.01,
+    0.02,
+    0.05,
+    0.08,
+    0.10,
+    0.125,
+    0.20,
+    0.25,
+    0.33,
+    0.50,
+    0.67,
+    0.75,
+    1,
+    1.25,
+    1.5,
+    2,
+    3,
+    4,
+    5,
+    8,
+    10,
+    16,
+    20,
+    50,
+    100
+  )
+  
+  keep <- candidates[
+    candidates >= limits[1] &
+      candidates <= limits[2]
+  ]
+  
+  if (length(keep) > max_breaks) {
+    keep <- keep[
+      unique(
+        round(
+          seq(
+            1,
+            length(keep),
+            length.out = max_breaks
+          )
+        )
+      )
+    ]
+  }
+  
+  if (limits[1] <= 1 &&
+      limits[2] >= 1 &&
+      !any(abs(keep - 1) < 1e-12)) {
+    keep <- sort(
+      unique(
+        c(
+          keep,
+          1
+        )
+      )
+    )
+  }
+  
+  if (length(keep) < 3L) {
+    keep <- exp(
+      seq(
+        log(limits[1]),
+        log(limits[2]),
+        length.out = 5L
+      )
+    )
+  }
+  
+  return(keep)
+}
+
+
+# Reflection KDE for a probability on [0, 1]. The augmented sample has
+# three copies of each observation, so its density is multiplied by three.
+reflected_probability_density <- function(x,
+                                          adjust = 1.05,
+                                          n = 512L) {
+  
+  x <- x[
+    is.finite(x) &
+      x >= 0 &
+      x <= 1
+  ]
+  
+  if (length(x) < 2L) {
+    stop(
+      "At least two probability draws are required.",
+      call. = FALSE
+    )
+  }
+  
+  x_min <- min(x)
+  x_max <- max(x)
+  
+  if (x_min == x_max) {
+    delta <- max(
+      1e-4,
+      abs(x_min) * 1e-4
+    )
+    x_min <- max(
+      0,
+      x_min - delta
+    )
+    x_max <- min(
+      1,
+      x_max + delta
+    )
+  }
+  
+  bandwidth <- stats::bw.nrd0(x)
+  
+  if (!is.finite(bandwidth) || bandwidth <= 0) {
+    bandwidth <- max(
+      (x_max - x_min) / 25,
+      1e-4
+    )
+  }
+  
+  density_out <- stats::density(
+    c(
+      x,
+      -x,
+      2 - x
+    ),
+    bw = bandwidth * adjust,
+    from = x_min,
+    to = x_max,
+    n = n,
+    cut = 0
+  )
+  
+  return(
+    tibble(
+      Value = density_out$x,
+      Density = 3 * density_out$y
+    )
+  )
+}
+
+
+ordinary_density <- function(x,
+                             adjust = 1.05,
+                             n = 512L) {
+  
+  x <- x[
+    is.finite(x)
+  ]
+  
+  if (length(x) < 2L) {
+    stop(
+      "At least two draws are required.",
+      call. = FALSE
+    )
+  }
+  
+  x_min <- min(x)
+  x_max <- max(x)
+  
+  if (x_min == x_max) {
+    delta <- max(
+      1e-4,
+      abs(x_min) * 1e-4
+    )
+    x_min <- x_min - delta
+    x_max <- x_max + delta
+  }
+  
+  density_out <- stats::density(
+    x,
+    adjust = adjust,
+    from = x_min,
+    to = x_max,
+    n = n,
+    cut = 0
+  )
+  
+  return(
+    tibble(
+      Value = density_out$x,
+      Density = density_out$y
+    )
+  )
+}
+
+
+parameter_axis_labels <- function(x) {
+  
+  finite_x <- x[
+    is.finite(x)
+  ]
+  
+  if (length(finite_x) == 0L) {
+    return(as.character(x))
+  }
+  
+  accuracy <- if (max(abs(finite_x)) > 2) {
+    1
+  } else {
+    0.01
+  }
+  
+  scales::number(
+    x,
+    accuracy = accuracy,
+    trim = TRUE
+  )
+}
+
+
+# =========================================================================
 # FOREST PLOT
 # =========================================================================
 
 make_pba_plot <- function(eff_out,
-                          title = NULL,
+                          title = "Probabilistic bias analysis",
                           subtitle = NULL,
-                          show_impossible = TRUE) {
+                          digits = 2,
+                          show_labels = TRUE,
+                          show_impossible = NULL) {
   
   effect_measure <- eff_out$effect_measure
-  
-  if (is.null(title)) {
-    title <- paste0(
-      "Probabilistic bias analysis: ",
-      effect_measure
-    )
-  }
-  
-  if (is.null(subtitle)) {
-    
-    if (show_impossible) {
-      
-      subtitle <- paste0(
-        "Median and 95% simulation interval; impossible draws = ",
-        scales::comma(eff_out$impossible)
-      )
-      
-    } else {
-      
-      subtitle <- "Median and 95% simulation interval"
-    }
-  }
+  effect_name <- full_effect_name(effect_measure)
   
   summary_stats <- tibble(
     Method = c(
@@ -1059,19 +1334,52 @@ make_pba_plot <- function(eff_out,
       "Total error"
     ),
     Estimate = c(
-      median(eff_out$re, na.rm = TRUE),
-      median(eff_out$syst, na.rm = TRUE),
-      median(eff_out$total, na.rm = TRUE)
+      median(
+        eff_out$re,
+        na.rm = TRUE
+      ),
+      median(
+        eff_out$syst,
+        na.rm = TRUE
+      ),
+      median(
+        eff_out$total,
+        na.rm = TRUE
+      )
     ),
     Lower = c(
-      quantile(eff_out$re, 0.025, na.rm = TRUE),
-      quantile(eff_out$syst, 0.025, na.rm = TRUE),
-      quantile(eff_out$total, 0.025, na.rm = TRUE)
+      quantile(
+        eff_out$re,
+        0.025,
+        na.rm = TRUE
+      ),
+      quantile(
+        eff_out$syst,
+        0.025,
+        na.rm = TRUE
+      ),
+      quantile(
+        eff_out$total,
+        0.025,
+        na.rm = TRUE
+      )
     ),
     Upper = c(
-      quantile(eff_out$re, 0.975, na.rm = TRUE),
-      quantile(eff_out$syst, 0.975, na.rm = TRUE),
-      quantile(eff_out$total, 0.975, na.rm = TRUE)
+      quantile(
+        eff_out$re,
+        0.975,
+        na.rm = TRUE
+      ),
+      quantile(
+        eff_out$syst,
+        0.975,
+        na.rm = TRUE
+      ),
+      quantile(
+        eff_out$total,
+        0.975,
+        na.rm = TRUE
+      )
     )
   ) %>%
     mutate(
@@ -1082,152 +1390,291 @@ make_pba_plot <- function(eff_out,
           "Random error only",
           "Total error"
         )
+      ),
+      Label = paste0(
+        format_effect(
+          Estimate,
+          digits
+        ),
+        "  [",
+        format_effect(
+          Lower,
+          digits
+        ),
+        ", ",
+        format_effect(
+          Upper,
+          digits
+        ),
+        "]"
       )
     )
   
-  null_value <- ifelse(
-    effect_measure %in% c("RR", "OR"),
-    1,
+  null_value <- if (effect_measure %in% c("RR", "OR")) {
+    1
+  } else {
     0
+  }
+  
+  x_min <- min(
+    summary_stats$Lower,
+    na.rm = TRUE
+  )
+  x_max <- max(
+    summary_stats$Upper,
+    na.rm = TRUE
   )
   
-  x_min <- min(summary_stats$Lower, na.rm = TRUE)
-  x_max <- max(summary_stats$Upper, na.rm = TRUE)
+  if (effect_measure %in% c("RR", "OR")) {
+    
+    core_min <- min(
+      x_min,
+      null_value
+    )
+    core_max <- max(
+      x_max,
+      null_value
+    )
+    
+    span <- log(
+      core_max / core_min
+    )
+    
+    if (!is.finite(span) || span <= 0) {
+      span <- log(1.5)
+    }
+    
+    x_lower <- exp(
+      log(core_min) -
+        0.14 * span
+    )
+    
+    x_upper_axis <- exp(
+      log(core_max) +
+        0.14 * span
+    )
+    
+    if (show_labels) {
+      label_x <- exp(
+        log(core_max) +
+          0.22 * span
+      )
+      
+      x_upper <- exp(
+        log(core_max) +
+          max(
+            0.70 * span,
+            log(2.2)
+          )
+      )
+    } else {
+      label_x <- NA_real_
+      x_upper <- x_upper_axis
+    }
+    
+    selected_breaks <- ratio_breaks(
+      c(
+        x_lower,
+        x_upper_axis
+      )
+    )
+    
+    x_label <- paste0(
+      effect_name,
+      " (log scale)"
+    )
+    
+  } else {
+    
+    core_min <- min(
+      x_min,
+      null_value
+    )
+    core_max <- max(
+      x_max,
+      null_value
+    )
+    
+    span <- core_max - core_min
+    
+    if (!is.finite(span) || span <= 0) {
+      span <- 0.1
+    }
+    
+    x_lower <- core_min -
+      0.14 * span
+    
+    x_upper_axis <- core_max +
+      0.14 * span
+    
+    if (show_labels) {
+      label_x <- core_max +
+        0.22 * span
+      
+      x_upper <- core_max +
+        0.75 * span
+    } else {
+      label_x <- NA_real_
+      x_upper <- x_upper_axis
+    }
+    
+    selected_breaks <- scales::breaks_pretty(n = 6)(
+      c(
+        x_lower,
+        x_upper_axis
+      )
+    )
+    
+    x_label <- effect_name
+  }
   
   p <- ggplot(
     summary_stats,
     aes(
-      y = Method,
-      x = Estimate
+      x = Estimate,
+      y = Method
     )
   ) +
     geom_vline(
       xintercept = null_value,
-      linetype = "dashed",
-      linewidth = 0.6
+      linetype = "22",
+      linewidth = 0.55,
+      color = "grey30"
     ) +
     geom_segment(
+      aes(
+        x = Lower,
+        xend = Upper,
+        yend = Method
+      ),
+      linewidth = 0.80,
+      lineend = "round",
+      color = "grey20"
+    ) +
+    geom_point(
+      size = 3.0,
+      color = "black"
+    ) +
+    geom_segment(
+      data = filter(
+        summary_stats,
+        Method == "Total error"
+      ),
       aes(
         x = Lower,
         xend = Upper,
         y = Method,
         yend = Method
       ),
-      linewidth = 0.9,
-      lineend = "round"
+      inherit.aes = FALSE,
+      linewidth = 1.10,
+      lineend = "round",
+      color = "black"
     ) +
     geom_point(
-      size = 3.4
+      data = filter(
+        summary_stats,
+        Method == "Total error"
+      ),
+      aes(
+        x = Estimate,
+        y = Method
+      ),
+      inherit.aes = FALSE,
+      size = 3.8,
+      color = "black"
     ) +
     labs(
       title = title,
       subtitle = subtitle,
-      x = effect_measure,
+      x = x_label,
       y = NULL
     ) +
-    theme_minimal(
-      base_size = 12
+    scale_y_discrete(
+      expand = expansion(
+        add = c(
+          0.45,
+          0.45
+        )
+      )
     ) +
+    theme_pba() +
     theme(
-      plot.title.position = "plot",
-      plot.title = element_text(
-        size = 13,
-        face = "bold",
-        margin = margin(b = 3)
-      ),
-      plot.subtitle = element_text(
-        size = 10,
-        margin = margin(b = 10)
-      ),
-      axis.title.x = element_text(
-        size = 12,
-        margin = margin(t = 8)
-      ),
-      axis.text.x = element_text(
-        size = 10
-      ),
+      panel.grid.major.y = element_blank(),
       axis.text.y = element_text(
         size = 11
       ),
-      panel.grid.minor = element_blank(),
-      panel.grid.major.y = element_blank(),
+      axis.line.x = element_line(
+        color = "grey35",
+        linewidth = 0.35
+      ),
+      axis.ticks.x = element_line(
+        color = "grey35",
+        linewidth = 0.35
+      ),
       plot.margin = margin(
-        10,
-        14,
-        10,
-        10
+        12,
+        34,
+        8,
+        12
       )
+    ) +
+    coord_cartesian(
+      clip = "off"
     )
   
-  if (effect_measure %in% c("RR", "OR")) {
-    
-    x_min_plot <- x_min * 0.85
-    x_max_plot <- x_max * 1.15
-    
-    candidate_breaks <- c(
-      0.0625,
-      0.125,
-      0.25,
-      0.5,
-      1,
-      2,
-      4,
-      8,
-      16,
-      32
-    )
-    
-    selected_breaks <- candidate_breaks[
-      candidate_breaks >= x_min_plot &
-        candidate_breaks <= x_max_plot
-    ]
-    
-    if (length(selected_breaks) < 2) {
-      selected_breaks <- scales::log_breaks(n = 5)(
-        c(
-          x_min_plot,
-          x_max_plot
-        )
-      )
-    }
-    
+  if (show_labels) {
     p <- p +
-      scale_x_continuous(
-        trans = "log",
-        breaks = selected_breaks,
-        labels = label_number(
-          accuracy = 0.01
-        )
-      ) +
-      coord_cartesian(
-        xlim = c(
-          x_min_plot,
-          x_max_plot
-        )
+      geom_text(
+        aes(
+          x = label_x,
+          label = Label
+        ),
+        hjust = 0,
+        size = 3.25
       )
   }
   
-  if (effect_measure == "RD") {
-    
-    x_range <- x_max - x_min
-    
-    if (x_range == 0) {
-      x_range <- 0.1
-    }
-    
-    x_pad <- 0.12 * x_range
+  if (effect_measure %in% c("RR", "OR")) {
     
     p <- p +
       scale_x_continuous(
-        breaks = scales::pretty_breaks(n = 5),
-        labels = label_number(
-          accuracy = 0.01
+        trans = "log10",
+        limits = c(
+          x_lower,
+          x_upper
+        ),
+        breaks = selected_breaks,
+        labels = scales::label_number(
+          accuracy = 0.01,
+          trim = TRUE
+        ),
+        expand = expansion(
+          mult = c(
+            0,
+            0
+          )
         )
-      ) +
-      coord_cartesian(
-        xlim = c(
-          x_min - x_pad,
-          x_max + x_pad
+      )
+    
+  } else {
+    
+    p <- p +
+      scale_x_continuous(
+        limits = c(
+          x_lower,
+          x_upper
+        ),
+        breaks = selected_breaks,
+        labels = scales::label_number(
+          accuracy = 0.01,
+          trim = TRUE
+        ),
+        expand = expansion(
+          mult = c(
+            0,
+            0
+          )
         )
       )
   }
@@ -1243,60 +1690,161 @@ make_pba_plot <- function(eff_out,
 make_bias_parameter_plot <- function(eff_out,
                                      use_valid_draws = TRUE,
                                      bins = NULL,
-                                     x_pad_fraction = 0.02) {
+                                     x_pad_fraction = 0.02,
+                                     density_adjust = 1.05,
+                                     show_legend = TRUE,
+                                     ncol = 3L) {
   
-  if (use_valid_draws) {
-    
-    draw_data <- eff_out$bias_draws_valid
-    draw_type <- "valid draws"
-    
-  } else {
-    
-    draw_data <- eff_out$bias_draws_all
-    draw_type <- "all input draws"
+  valid_draws <- eff_out$bias_draws_valid
+  prior_draws <- eff_out$bias_draws_all
+  
+  if (nrow(valid_draws) < 2L ||
+      nrow(prior_draws) < 2L) {
+    stop(
+      "Not enough draws for a bias-parameter plot.",
+      call. = FALSE
+    )
   }
   
-  n_plot <- nrow(draw_data)
+  histogram_source <- if (use_valid_draws) {
+    "Accepted draws"
+  } else {
+    "Prior draws"
+  }
   
   if (is.null(bins)) {
-    bins <- choose_hist_bins(n_plot)
+    bins <- choose_hist_bins(
+      if (use_valid_draws) {
+        nrow(valid_draws)
+      } else {
+        nrow(prior_draws)
+      }
+    )
   }
   
-  plot_data <- draw_data %>%
-    select(
-      prev_conf_exp,
-      prev_conf_unexp,
-      rr_conf_disease
-    ) %>%
-    pivot_longer(
-      cols = everything(),
-      names_to = "Parameter",
-      values_to = "Value"
-    ) %>%
-    filter(
-      is.finite(Value)
-    ) %>%
+  parameter_levels <- c(
+    "Confounder prevalence: exposed (%)",
+    "Confounder prevalence: unexposed (%)",
+    "Confounder–disease risk ratio"
+  )
+  
+  reshape_parameters <- function(draw_data,
+                                 source_label) {
+    
+    draw_data %>%
+      select(
+        prev_conf_exp,
+        prev_conf_unexp,
+        rr_conf_disease
+      ) %>%
+      pivot_longer(
+        cols = everything(),
+        names_to = "ParameterKey",
+        values_to = "Value"
+      ) %>%
+      filter(
+        is.finite(Value)
+      ) %>%
+      mutate(
+        Parameter = recode(
+          ParameterKey,
+          prev_conf_exp = "Confounder prevalence: exposed (%)",
+          prev_conf_unexp = "Confounder prevalence: unexposed (%)",
+          rr_conf_disease = "Confounder–disease risk ratio"
+        ),
+        Parameter = factor(
+          Parameter,
+          levels = parameter_levels
+        ),
+        IsProbability = ParameterKey %in% c(
+          "prev_conf_exp",
+          "prev_conf_unexp"
+        ),
+        ScaleFactor = ifelse(
+          IsProbability,
+          100,
+          1
+        ),
+        DisplayValue = Value * ScaleFactor,
+        Source = source_label
+      )
+  }
+  
+  long_valid <- reshape_parameters(
+    valid_draws,
+    "Accepted draws"
+  )
+  
+  long_prior <- reshape_parameters(
+    prior_draws,
+    "Prior draws"
+  )
+  
+  long_all <- bind_rows(
+    long_valid,
+    long_prior
+  ) %>%
     mutate(
-      Parameter = recode(
-        Parameter,
-        prev_conf_exp = "Confounder prevalence among exposed",
-        prev_conf_unexp = "Confounder prevalence among unexposed",
-        rr_conf_disease = "Confounder–disease risk ratio"
-      ),
-      Parameter = factor(
-        Parameter,
+      Source = factor(
+        Source,
         levels = c(
-          "Confounder prevalence among exposed",
-          "Confounder prevalence among unexposed",
-          "Confounder–disease risk ratio"
+          "Accepted draws",
+          "Prior draws"
         )
       )
     )
   
+  density_data <- long_all %>%
+    group_by(
+      Parameter,
+      Source
+    ) %>%
+    group_modify(
+      ~ {
+        is_probability <- unique(
+          .x$IsProbability
+        )
+        
+        scale_factor <- unique(
+          .x$ScaleFactor
+        )
+        
+        if (length(is_probability) != 1L ||
+            length(scale_factor) != 1L) {
+          stop(
+            "Internal parameter-scale error.",
+            call. = FALSE
+          )
+        }
+        
+        density_out <- if (is_probability) {
+          reflected_probability_density(
+            .x$Value,
+            adjust = density_adjust
+          )
+        } else {
+          ordinary_density(
+            .x$Value,
+            adjust = density_adjust
+          )
+        }
+        
+        density_out %>%
+          transmute(
+            DisplayValue = Value * scale_factor,
+            Density = Density / scale_factor
+          )
+      }
+    ) %>%
+    ungroup()
+  
   p <- ggplot(
-    plot_data,
+    filter(
+      long_all,
+      Source == histogram_source
+    ),
     aes(
-      x = Value
+      x = DisplayValue
     )
   ) +
     geom_histogram(
@@ -1304,79 +1852,107 @@ make_bias_parameter_plot <- function(eff_out,
         y = after_stat(density)
       ),
       bins = bins,
-      alpha = 0.35
+      fill = "grey83",
+      color = "white",
+      linewidth = 0.20
     ) +
-    geom_density(
-      linewidth = 0.9,
-      adjust = 1.1,
-      trim = TRUE
+    geom_line(
+      data = density_data,
+      aes(
+        x = DisplayValue,
+        y = Density,
+        linetype = Source,
+        color = Source
+      ),
+      inherit.aes = FALSE,
+      linewidth = 0.90,
+      show.legend = show_legend
     ) +
     facet_wrap(
       ~Parameter,
-      ncol = 2,
+      ncol = ncol,
       scales = "free"
     ) +
     scale_x_continuous(
-      breaks = scales::pretty_breaks(n = 5),
-      labels = label_number(
-        accuracy = 0.01
-      ),
+      breaks = scales::breaks_pretty(n = 4),
+      labels = parameter_axis_labels,
       expand = expansion(
         mult = c(
-          x_pad_fraction,
+          0,
           x_pad_fraction
+        )
+      ),
+      guide = guide_axis(
+        check.overlap = TRUE
+      )
+    ) +
+    scale_y_continuous(
+      expand = expansion(
+        mult = c(
+          0,
+          0.08
         )
       )
     ) +
+    scale_linetype_manual(
+      values = c(
+        "Accepted draws" = "solid",
+        "Prior draws" = "31"
+      )
+    ) +
+    scale_color_manual(
+      values = c(
+        "Accepted draws" = "black",
+        "Prior draws" = "grey45"
+      )
+    ) +
     labs(
-      title = "Uncontrolled-confounding parameter draws",
-      subtitle = paste0(
-        "Histograms and smoothed densities of ",
-        draw_type,
-        "; bins = ",
-        bins
-      ),
+      title = "Bias-parameter distributions",
       x = NULL,
-      y = "Density"
+      y = NULL
     ) +
-    theme_minimal(
-      base_size = 12
-    ) +
+    theme_pba() +
     theme(
-      plot.title.position = "plot",
-      plot.title = element_text(
-        size = 13,
-        face = "bold",
-        margin = margin(b = 3)
+      panel.grid.major.y = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      panel.border = element_rect(
+        color = "grey86",
+        fill = NA,
+        linewidth = 0.45
       ),
-      plot.subtitle = element_text(
-        size = 10,
-        margin = margin(b = 10)
-      ),
-      strip.text = element_text(
-        size = 10,
-        face = "bold",
-        hjust = 0
-      ),
-      panel.grid.minor = element_blank(),
       panel.spacing = grid::unit(
-        1.2,
+        1.0,
         "lines"
       ),
-      axis.text.x = element_text(
-        size = 8.5
-      ),
-      axis.text.y = element_text(
-        size = 9.5
-      ),
-      axis.title.y = element_text(
-        size = 11
-      ),
       plot.margin = margin(
-        10,
-        14,
-        10,
-        10
+        12,
+        12,
+        6,
+        12
+      ),
+      legend.position = if (show_legend) {
+        "top"
+      } else {
+        "none"
+      },
+      legend.direction = "horizontal",
+      legend.justification = "left",
+      legend.title = element_blank(),
+      legend.text = element_text(
+        size = 9.6
+      ),
+      legend.margin = margin(
+        0,
+        0,
+        0,
+        0
+      ),
+      legend.box.margin = margin(
+        0,
+        0,
+        4,
+        0
       )
     )
   
@@ -1396,29 +1972,46 @@ make_effect_density_plot <- function(
       "random",
       "adjusted"
     ),
-    bins = NULL) {
+    bins = NULL,
+    display_quantiles = c(
+      0.005,
+      0.995
+    ),
+    density_adjust = 1.05) {
   
   effect_source <- match.arg(effect_source)
   effect_measure <- eff_out$effect_measure
+  effect_name <- full_effect_name(effect_measure)
+  
+  if (length(display_quantiles) != 2L ||
+      any(!is.finite(display_quantiles)) ||
+      display_quantiles[1] < 0 ||
+      display_quantiles[2] > 1 ||
+      display_quantiles[1] >= display_quantiles[2]) {
+    stop(
+      "display_quantiles must be two increasing probabilities in [0,1].",
+      call. = FALSE
+    )
+  }
   
   if (effect_source == "total") {
     eff <- eff_out$total
-    plot_label <- "Total error"
+    source_title <- "Distribution of total-error draws"
   }
   
   if (effect_source == "systematic") {
     eff <- eff_out$syst
-    plot_label <- "Systematic error only"
+    source_title <- "Distribution of systematic-error draws"
   }
   
   if (effect_source == "random") {
     eff <- eff_out$re
-    plot_label <- "Random error only"
+    source_title <- "Distribution of random-error draws"
   }
   
   if (effect_source == "adjusted") {
     eff <- eff_out$adjusted
-    plot_label <- "Adjusted estimate before random error"
+    source_title <- "Distribution of adjusted draws"
   }
   
   plot_data <- tibble(
@@ -1428,168 +2021,212 @@ make_effect_density_plot <- function(
       is.finite(Effect)
     )
   
+  if (effect_measure %in% c("RR", "OR")) {
+    plot_data <- plot_data %>%
+      filter(
+        Effect > 0
+      )
+  }
+  
+  if (nrow(plot_data) < 2L) {
+    stop(
+      "Not enough finite effect draws.",
+      call. = FALSE
+    )
+  }
+  
   if (is.null(bins)) {
     bins <- choose_hist_bins(
       nrow(plot_data)
     )
   }
   
+  interval_quantiles <- quantile(
+    plot_data$Effect,
+    c(
+      0.025,
+      0.5,
+      0.975
+    ),
+    na.rm = TRUE
+  )
+  
   if (effect_measure %in% c("RR", "OR")) {
     
     plot_data <- plot_data %>%
-      filter(
-        Effect > 0
-      ) %>%
       mutate(
-        PlotEffect = log(Effect)
+        PlotValue = log(Effect)
       )
     
     displayed_limits <- quantile(
-      plot_data$PlotEffect,
-      c(0.005, 0.995),
+      plot_data$PlotValue,
+      display_quantiles,
       na.rm = TRUE
+    )
+    
+    selected_breaks <- ratio_breaks(
+      exp(displayed_limits)
     )
     
     p <- ggplot(
       plot_data,
       aes(
-        x = PlotEffect
+        x = PlotValue
       )
     ) +
+      annotate(
+        "rect",
+        xmin = log(interval_quantiles[1]),
+        xmax = log(interval_quantiles[3]),
+        ymin = -Inf,
+        ymax = Inf,
+        fill = "grey94"
+      ) +
       geom_histogram(
         aes(
           y = after_stat(density)
         ),
         bins = bins,
-        alpha = 0.35
+        fill = "grey78",
+        color = "white",
+        linewidth = 0.18
       ) +
       geom_density(
-        linewidth = 0.9,
-        adjust = 1.1,
-        trim = TRUE
+        linewidth = 1,
+        adjust = density_adjust,
+        color = "black"
+      ) +
+      geom_vline(
+        xintercept = log(interval_quantiles[2]),
+        linewidth = 0.65
       ) +
       geom_vline(
         xintercept = 0,
-        linetype = "dashed",
-        linewidth = 0.6
-      ) +
-      scale_x_continuous(
-        breaks = scales::pretty_breaks(n = 6),
-        labels = label_number(
-          accuracy = 0.01
-        )
+        linetype = "22",
+        linewidth = 0.55,
+        color = "grey30"
       ) +
       coord_cartesian(
         xlim = displayed_limits
       ) +
+      scale_x_continuous(
+        breaks = log(selected_breaks),
+        labels = scales::number(
+          selected_breaks,
+          accuracy = 0.01,
+          trim = TRUE
+        ),
+        expand = expansion(
+          mult = c(
+            0,
+            0
+          )
+        )
+      ) +
       labs(
-        title = paste0(
-          plot_label,
-          " distribution"
-        ),
-        subtitle = paste0(
-          "Histogram and smoothed density of log(",
-          effect_measure,
-          "); bins = ",
-          bins
-        ),
+        title = source_title,
         x = paste0(
-          "log(",
-          effect_measure,
-          ")"
+          effect_name,
+          " (log scale)"
         ),
         y = "Density"
       )
-  }
-  
-  if (effect_measure == "RD") {
+    
+  } else {
     
     plot_data <- plot_data %>%
       mutate(
-        PlotEffect = Effect
+        PlotValue = Effect
       )
     
     displayed_limits <- quantile(
-      plot_data$PlotEffect,
-      c(0.005, 0.995),
+      plot_data$PlotValue,
+      display_quantiles,
       na.rm = TRUE
     )
     
     p <- ggplot(
       plot_data,
       aes(
-        x = PlotEffect
+        x = PlotValue
       )
     ) +
+      annotate(
+        "rect",
+        xmin = interval_quantiles[1],
+        xmax = interval_quantiles[3],
+        ymin = -Inf,
+        ymax = Inf,
+        fill = "grey94"
+      ) +
       geom_histogram(
         aes(
           y = after_stat(density)
         ),
         bins = bins,
-        alpha = 0.35
+        fill = "grey78",
+        color = "white",
+        linewidth = 0.18
       ) +
       geom_density(
-        linewidth = 0.9,
-        adjust = 1.1,
-        trim = TRUE
+        linewidth = 1,
+        adjust = density_adjust,
+        color = "black"
+      ) +
+      geom_vline(
+        xintercept = interval_quantiles[2],
+        linewidth = 0.65
       ) +
       geom_vline(
         xintercept = 0,
-        linetype = "dashed",
-        linewidth = 0.6
-      ) +
-      scale_x_continuous(
-        breaks = scales::pretty_breaks(n = 6),
-        labels = label_number(
-          accuracy = 0.01
-        )
+        linetype = "22",
+        linewidth = 0.55,
+        color = "grey30"
       ) +
       coord_cartesian(
         xlim = displayed_limits
       ) +
+      scale_x_continuous(
+        breaks = scales::breaks_pretty(n = 7),
+        labels = scales::label_number(
+          accuracy = 0.01,
+          trim = TRUE
+        ),
+        expand = expansion(
+          mult = c(
+            0,
+            0
+          )
+        )
+      ) +
       labs(
-        title = paste0(
-          plot_label,
-          " distribution"
-        ),
-        subtitle = paste0(
-          "Histogram and smoothed density of ",
-          effect_measure,
-          "; bins = ",
-          bins
-        ),
-        x = effect_measure,
+        title = source_title,
+        x = effect_name,
         y = "Density"
       )
   }
   
   p <- p +
-    theme_minimal(
-      base_size = 12
+    scale_y_continuous(
+      expand = expansion(
+        mult = c(
+          0,
+          0.08
+        )
+      ),
+      labels = scales::label_number(
+        accuracy = 0.1,
+        trim = TRUE
+      )
     ) +
+    theme_pba() +
     theme(
-      plot.title.position = "plot",
-      plot.title = element_text(
-        size = 13,
-        face = "bold",
-        margin = margin(b = 3)
-      ),
-      plot.subtitle = element_text(
-        size = 10,
-        margin = margin(b = 10)
-      ),
-      panel.grid.minor = element_blank(),
-      axis.text = element_text(
-        size = 10
-      ),
-      axis.title = element_text(
-        size = 11
-      ),
+      panel.grid.major.y = element_blank(),
       plot.margin = margin(
-        10,
-        14,
-        10,
-        10
+        12,
+        12,
+        8,
+        12
       )
     )
   
@@ -1613,14 +2250,21 @@ pba_results <- function(eff_out,
     ),
     plot = make_pba_plot(
       eff_out,
-      title = title,
-      subtitle = subtitle
+      title = if (is.null(title)) {
+        "Probabilistic bias analysis"
+      } else {
+        title
+      },
+      subtitle = subtitle,
+      digits = min(
+        digits,
+        3
+      )
     ),
-    bias_parameter_plot = make_bias_parameter_plot(
-      eff_out,
-      use_valid_draws = TRUE
+    parameter_plot = make_bias_parameter_plot(
+      eff_out
     ),
-    effect_plot = make_effect_density_plot(
+    distribution_plot = make_effect_density_plot(
       eff_out,
       effect_source = "total"
     ),
@@ -1630,6 +2274,10 @@ pba_results <- function(eff_out,
     impossible = eff_out$impossible,
     raw = eff_out
   )
+  
+  # Retain the original object names so earlier code continues to work.
+  out$bias_parameter_plot <- out$parameter_plot
+  out$effect_plot <- out$distribution_plot
   
   class(out) <- "pba_results"
   
@@ -1711,36 +2359,138 @@ plot.pba_results <- function(
     x,
     which = c(
       "forest",
-      "bias_parameters",
-      "effect"
+      "parameters",
+      "distribution"
     ),
     ...) {
   
-  which <- match.arg(which)
+  which <- tolower(
+    which[1]
+  )
   
-  if (which == "forest") {
-    
-    print(x$plot)
-    return(
-      invisible(x$plot)
-    )
-  }
-  
+  # Backward-compatible aliases from the original script.
   if (which == "bias_parameters") {
-    
-    print(x$bias_parameter_plot)
-    return(
-      invisible(x$bias_parameter_plot)
-    )
+    which <- "parameters"
   }
   
   if (which == "effect") {
-    
-    print(x$effect_plot)
-    return(
-      invisible(x$effect_plot)
+    which <- "distribution"
+  }
+  
+  if (!which %in% c(
+    "forest",
+    "parameters",
+    "distribution"
+  )) {
+    stop(
+      "which must be 'forest', 'parameters', or 'distribution'.",
+      call. = FALSE
     )
   }
+  
+  p <- switch(
+    which,
+    forest = x$plot,
+    parameters = x$parameter_plot,
+    distribution = x$distribution_plot
+  )
+  
+  print(p)
+  
+  return(
+    invisible(p)
+  )
+}
+
+
+# =========================================================================
+# SAVE ALL THREE PLOTS WITH CONSISTENT DIMENSIONS
+# =========================================================================
+
+save_pba_plots <- function(x,
+                           directory = ".",
+                           prefix = "pba_confounding",
+                           format = c(
+                             "pdf",
+                             "png"
+                           ),
+                           dpi = 320) {
+  
+  if (!inherits(x, "pba_results")) {
+    stop(
+      "x must be a pba_results object.",
+      call. = FALSE
+    )
+  }
+  
+  format <- match.arg(format)
+  
+  dir.create(
+    directory,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+  
+  files <- c(
+    forest = file.path(
+      directory,
+      paste0(
+        prefix,
+        "_forest.",
+        format
+      )
+    ),
+    parameters = file.path(
+      directory,
+      paste0(
+        prefix,
+        "_parameters.",
+        format
+      )
+    ),
+    distribution = file.path(
+      directory,
+      paste0(
+        prefix,
+        "_distribution.",
+        format
+      )
+    )
+  )
+  
+  ggsave(
+    filename = files["forest"],
+    plot = x$plot,
+    width = 9.25,
+    height = 4.9,
+    units = "in",
+    dpi = dpi,
+    bg = "white"
+  )
+  
+  ggsave(
+    filename = files["parameters"],
+    plot = x$parameter_plot,
+    width = 10.5,
+    height = 4.8,
+    units = "in",
+    dpi = dpi,
+    bg = "white"
+  )
+  
+  ggsave(
+    filename = files["distribution"],
+    plot = x$distribution_plot,
+    width = 9.25,
+    height = 4.9,
+    units = "in",
+    dpi = dpi,
+    bg = "white"
+  )
+  
+  return(
+    invisible(files)
+  )
 }
 
 
@@ -1796,14 +2546,14 @@ plot(
 # Bias-parameter histograms and densities
 plot(
   sum.conf.results,
-  which = "bias_parameters"
+  which = "parameters"
 )
 
 
 # Total-error effect distribution
 plot(
   sum.conf.results,
-  which = "effect"
+  which = "distribution"
 )
 
 
@@ -1814,27 +2564,10 @@ sum.conf.results$bias_parameter_plot
 sum.conf.results$effect_plot
 
 
-# Optional: save plots
-ggsave(
-  filename = "pba_confounding_forest_plot.png",
-  plot = sum.conf.results$plot,
-  width = 7.5,
-  height = 4.2,
-  dpi = 300
-)
-
-ggsave(
-  filename = "pba_confounding_parameter_draws.png",
-  plot = sum.conf.results$bias_parameter_plot,
-  width = 8.5,
-  height = 6.2,
-  dpi = 300
-)
-
-ggsave(
-  filename = "pba_confounding_effect_distribution.png",
-  plot = sum.conf.results$effect_plot,
-  width = 6.5,
-  height = 4.5,
-  dpi = 300
-)
+# Optional: save all three plots with matched dimensions
+# save_pba_plots(
+#   sum.conf.results,
+#   directory = "figures",
+#   prefix = "pba_confounding",
+#   format = "png"
+# )

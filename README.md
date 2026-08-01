@@ -22,3 +22,13 @@ Version: 1
 Version Date: 7_29_26
 Checks: preliminary checks vs spreadsheet and old code - passed
 
+3. Summary level outcome misclassification adjustment in cohort/cross sectional
+File: summary_outcome_cohort.r
+Version Date: 8_01_26
+Checks: preliminary checks vs old code - passed
+
+4. Summary level outcome misclassification adjustment in case control
+File: summary_outcome_cact.r
+Version Date: 8_01_26
+Checks: preliminary checks vs old code - passed
+

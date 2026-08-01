@@ -1,18 +1,23 @@
-# SCRIPT VERSION: 2026-08-01-v3
+# SCRIPT VERSION: 2026-08-01-v2
 ###############################################################################
-# Probabilistic bias analysis for exposure misclassification: summary data
+# Probabilistic bias analysis for outcome misclassification: summary data
+# Cohort-like or cross-sectional 2 x 2 table
 #
 # Author: R MACLEHOSE
 # Ref: Fox, MacLehose, Lash book on QBA
 #
-#8/1/26
-# This version uses type="nd", type="diff(.80)", or type="diff(se=.80,sp=.60)"; no separate rho argument.
-# Revised plotting and interface:
-#   - cleaner publication-style graphics with less nonessential text
-#   - differential misclassification specified inside `type`, e.g. diff(.80)
-#   - optional separate Gaussian-copula correlations via diff(se=.80, sp=.60)
-#   - bias-parameter plot overlays accepted-draw and prior densities
-#   - forest plot has more horizontal padding beyond the intervals
+# Revised to match summary_exposure misclass.R:
+#   - same a/b/c/d table notation and effect_measure argument
+#   - type="nd", type="diff(.80)", or type="diff(se=.80,sp=.60)"
+#   - descriptive internal variable names and structured output object
+#   - print(), summary(), plot(), and save_pba_plots() methods
+#   - matching forest, bias-parameter, and effect-distribution graphics
+#
+# Bias-parameter distributions:
+#   - sensitivity: beta distributions
+#   - specificity: beta distributions
+#   - under differential misclassification, exposed and unexposed draws are
+#     correlated through separate Gaussian copulas for Se and Sp
 ###############################################################################
 
 library(ggplot2)
@@ -24,14 +29,20 @@ library(knitr)
 
 # Observed table:
 #                     Exposed   Unexposed
-# Cases                   a          b
-# Controls/noncases       c          d
+# Observed cases           a          b
+# Observed noncases        c          d
+#
+# Outcome-classification parameters:
+#   se1, sp1: sensitivity and specificity among exposed persons
+#   se0, sp0: sensitivity and specificity among unexposed persons
 #
 # OR = (a/b)/(c/d)
 # RR = [a/(a+c)]/[b/(b+d)]
 # RD = [a/(a+c)]-[b/(b+d)]
-# RR and RD require controls to be noncases from a cohort-like or
-# cross-sectional risk table. For sampled controls, OR is the natural measure.
+#
+# This file is intended for cohort-like or cross-sectional data in which
+# c and d are observed noncases. Use the separate case-control file when
+# cases and controls were sampled at different fractions.
 
 # -----------------------------------------------------------------------------
 # Small helpers
@@ -62,10 +73,12 @@ validate_pba_inputs <- function(a, b, c, d,
                                 SIMS) {
   counts <- c(a = a, b = b, c = c, d = d)
   shapes <- c(
-    se1.a = se1.a, se1.b = se1.b, se0.a = se0.a, se0.b = se0.b,
-    sp1.a = sp1.a, sp1.b = sp1.b, sp0.a = sp0.a, sp0.b = sp0.b
+    se1.a = se1.a, se1.b = se1.b,
+    se0.a = se0.a, se0.b = se0.b,
+    sp1.a = sp1.a, sp1.b = sp1.b,
+    sp0.a = sp0.a, sp0.b = sp0.b
   )
-  
+
   if (any(!is.finite(counts)) || any(counts <= 0)) {
     stop("a, b, c, and d must all be positive and finite.", call. = FALSE)
   }
@@ -77,6 +90,7 @@ validate_pba_inputs <- function(a, b, c, d,
     stop("All beta-distribution shape parameters must be positive and finite.",
          call. = FALSE)
   }
+
   if (length(SIMS) != 1L || !is.finite(SIMS) || SIMS < 2 || SIMS != round(SIMS)) {
     stop("SIMS must be a whole number of at least 2.", call. = FALSE)
   }
@@ -93,7 +107,7 @@ normalize_rho <- function(rho) {
     stop("rho must be one finite number or two finite numbers for Se and Sp.",
          call. = FALSE)
   }
-  
+
   if (length(rho) == 1L) {
     out <- c(se = unname(rho), sp = unname(rho))
   } else if (is.null(names(rho))) {
@@ -111,7 +125,7 @@ normalize_rho <- function(rho) {
       sp = unname(rho[match("sp", nm)])
     )
   }
-  
+
   if (any(abs(out) >= 1)) {
     stop("Each rho must lie strictly between -1 and 1.", call. = FALSE)
   }
@@ -124,22 +138,17 @@ parse_diff_contents <- function(contents) {
     stop("Use type='diff(...)', e.g. 'diff(.80)' or 'diff(se=.80,sp=.60)'.",
          call. = FALSE)
   }
-  
-  # single rho, e.g. diff(.80)
+
   one_num <- suppressWarnings(as.numeric(contents))
-  if (!is.na(one_num)) {
-    return(normalize_rho(one_num))
-  }
-  
-  # named specification, e.g. diff(se=.80,sp=.60)
+  if (!is.na(one_num)) return(normalize_rho(one_num))
+
   parts <- strsplit(contents, ",", fixed = TRUE)[[1]]
   vals <- lapply(parts, function(x) strsplit(x, "=", fixed = TRUE)[[1]])
-  ok <- lengths(vals) == 2L
-  if (!all(ok)) {
+  if (!all(lengths(vals) == 2L)) {
     stop("Differential type must look like 'diff(.80)' or 'diff(se=.80,sp=.60)'.",
          call. = FALSE)
   }
-  
+
   nm <- tolower(vapply(vals, `[`, character(1), 1))
   nm[nm %in% c("sens", "sensitivity")] <- "se"
   nm[nm %in% c("spec", "specificity")] <- "sp"
@@ -155,66 +164,66 @@ parse_misclassification <- function(type) {
   if (!is.character(type) || length(type) != 1L || is.na(type)) {
     stop("type must be one character string.", call. = FALSE)
   }
-  
+
   type_clean <- tolower(gsub("\\s+", "", type))
-  
+
   if (type_clean %in% c("nd", "nondiff", "nondifferential")) {
     return(list(
       type = "nondiff",
       rho = c(se = NA_real_, sp = NA_real_),
-      label = "Nondifferential exposure misclassification"
+      label = "Nondifferential outcome misclassification"
     ))
   }
-  
+
   pieces <- regmatches(
     type_clean,
     regexec("^diff(?:erential)?\\((.*)\\)$", type_clean, perl = TRUE)
   )[[1]]
-  
+
   if (length(pieces) == 0L) {
     stop(
       paste0(
         "type must be 'nd', 'diff(.80)', or 'diff(se=.80,sp=.60)'. ",
-        "The separate rho= argument is no longer used."
+        "The separate rho= argument is not used."
       ),
       call. = FALSE
     )
   }
-  
+
   rho_out <- parse_diff_contents(pieces[2])
   same_rho <- isTRUE(all.equal(unname(rho_out["se"]), unname(rho_out["sp"])))
   label <- if (same_rho) {
     paste0(
-      "Differential exposure misclassification; Gaussian-copula rho = ",
+      "Differential outcome misclassification; Gaussian-copula rho = ",
       formatC(rho_out["se"], format = "f", digits = 2)
     )
   } else {
     paste0(
-      "Differential exposure misclassification; Gaussian-copula rho(Se) = ",
+      "Differential outcome misclassification; Gaussian-copula rho(Se) = ",
       formatC(rho_out["se"], format = "f", digits = 2),
       ", rho(Sp) = ",
       formatC(rho_out["sp"], format = "f", digits = 2)
     )
   }
-  
+
   list(type = "diff", rho = rho_out, label = label)
 }
 
 # -----------------------------------------------------------------------------
-# Core effect calculations
+# Core calculations
 # -----------------------------------------------------------------------------
 
 calc_effect <- function(cases_exp, cases_unexp, controls_exp, controls_unexp,
                         effect_measure = c("OR", "RR", "RD")) {
   effect_measure <- match.arg(effect_measure)
-  
+
   if (effect_measure == "OR") {
     return((cases_exp / cases_unexp) / (controls_exp / controls_unexp))
   }
-  
+
   risk_exp <- cases_exp / (cases_exp + controls_exp)
   risk_unexp <- cases_unexp / (cases_unexp + controls_unexp)
-  
+
   if (effect_measure == "RR") return(risk_exp / risk_unexp)
   risk_exp - risk_unexp
 }
@@ -223,21 +232,21 @@ calc_effect <- function(cases_exp, cases_unexp, controls_exp, controls_unexp,
 calc_effect_se <- function(cases_exp, cases_unexp, controls_exp, controls_unexp,
                            effect_measure = c("OR", "RR", "RD")) {
   effect_measure <- match.arg(effect_measure)
-  
+
   if (effect_measure == "OR") {
     return(sqrt(
       1 / cases_exp + 1 / cases_unexp +
         1 / controls_exp + 1 / controls_unexp
     ))
   }
-  
+
   if (effect_measure == "RR") {
     return(sqrt(
       1 / cases_exp - 1 / (cases_exp + controls_exp) +
         1 / cases_unexp - 1 / (cases_unexp + controls_unexp)
     ))
   }
-  
+
   risk_exp <- cases_exp / (cases_exp + controls_exp)
   risk_unexp <- cases_unexp / (cases_unexp + controls_unexp)
   sqrt(
@@ -254,17 +263,21 @@ add_random_error <- function(eff, se,
   eff + z * se
 }
 
-draw_correlated_beta_pair <- function(n,
-                                      cases_a, cases_b,
-                                      controls_a, controls_b,
-                                      rho) {
+draw_gaussian_copula <- function(n, rho) {
   sigma <- matrix(c(1, rho, rho, 1), nrow = 2L)
   z <- MASS::mvrnorm(n, mu = c(0, 0), Sigma = sigma, empirical = FALSE)
   if (is.null(dim(z))) z <- matrix(z, nrow = 1L)
-  u <- stats::pnorm(z)
+  stats::pnorm(z)
+}
+
+draw_correlated_beta_pair <- function(n,
+                                      exposed_a, exposed_b,
+                                      unexposed_a, unexposed_b,
+                                      rho) {
+  u <- draw_gaussian_copula(n, rho)
   tibble(
-    cases = stats::qbeta(u[, 1], cases_a, cases_b),
-    controls = stats::qbeta(u[, 2], controls_a, controls_b)
+    exposed = stats::qbeta(u[, 1], exposed_a, exposed_b),
+    unexposed = stats::qbeta(u[, 2], unexposed_a, unexposed_b)
   )
 }
 
@@ -272,7 +285,7 @@ draw_correlated_beta_pair <- function(n,
 # Main PBA function
 # -----------------------------------------------------------------------------
 
-pba.summary.exp <- function(a, b, c, d,
+pba.summary.out <- function(a, b, c, d,
                             se1.a, se1.b,
                             se0.a, se0.b,
                             sp1.a, sp1.b,
@@ -285,19 +298,17 @@ pba.summary.exp <- function(a, b, c, d,
   if ("rho" %in% names(dots)) {
     stop(
       paste0(
-        "rho is no longer a separate argument. ",
+        "rho is not a separate argument. ",
         "Use type='diff(.80)' or type='diff(se=.80,sp=.60)'."
       ),
       call. = FALSE
     )
   }
   if (length(dots) > 0L) {
-    stop(
-      paste0("Unused argument(s): ", paste(names(dots), collapse = ", ")),
-      call. = FALSE
-    )
+    stop("Unused argument(s): ", paste(names(dots), collapse = ", "),
+         call. = FALSE)
   }
-  
+
   effect_measure <- match.arg(effect_measure)
   validate_pba_inputs(
     a, b, c, d,
@@ -306,144 +317,158 @@ pba.summary.exp <- function(a, b, c, d,
     SIMS
   )
   misclass <- parse_misclassification(type)
-  
-  n_cases <- a + b
-  n_controls <- c + d
+
+  n_exposed <- a + c
+  n_unexposed <- b + d
   niter <- as.integer(SIMS)
   draw_id <- seq_len(niter)
-  
+
   if (misclass$type == "nondiff") {
     if (!isTRUE(all.equal(c(se1.a, se1.b), c(se0.a, se0.b))) ||
         !isTRUE(all.equal(c(sp1.a, sp1.b), c(sp0.a, sp0.b)))) {
       warning(
         paste0(
           "For type='nd', common Se and Sp draws are required. ",
-          "Beta(se1.a,se1.b) and Beta(sp1.a,sp1.b) define the common ",
-          "distributions; se0.* and sp0.* are ignored."
+          "The se1.* and sp1.* arguments define the common distributions; ",
+          "se0.* and sp0.* are ignored."
         ),
         call. = FALSE
       )
     }
-    se_cases <- stats::rbeta(niter, se1.a, se1.b)
-    se_controls <- se_cases
-    sp_cases <- stats::rbeta(niter, sp1.a, sp1.b)
-    sp_controls <- sp_cases
+
+    se_exposed <- stats::rbeta(niter, se1.a, se1.b)
+    se_unexposed <- se_exposed
+    sp_exposed <- stats::rbeta(niter, sp1.a, sp1.b)
+    sp_unexposed <- sp_exposed
   } else {
     se_pair <- draw_correlated_beta_pair(
-      niter, se1.a, se1.b, se0.a, se0.b, unname(misclass$rho["se"])
+      niter,
+      se1.a, se1.b,
+      se0.a, se0.b,
+      unname(misclass$rho["se"])
     )
     sp_pair <- draw_correlated_beta_pair(
-      niter, sp1.a, sp1.b, sp0.a, sp0.b, unname(misclass$rho["sp"])
+      niter,
+      sp1.a, sp1.b,
+      sp0.a, sp0.b,
+      unname(misclass$rho["sp"])
     )
-    se_cases <- se_pair$cases
-    se_controls <- se_pair$controls
-    sp_cases <- sp_pair$cases
-    sp_controls <- sp_pair$controls
+    se_exposed <- se_pair$exposed
+    se_unexposed <- se_pair$unexposed
+    sp_exposed <- sp_pair$exposed
+    sp_unexposed <- sp_pair$unexposed
   }
-  
+
   bias_draws_all <- tibble(
     draw = draw_id,
-    se_cases, se_controls, sp_cases, sp_controls
+    se_exposed,
+    se_unexposed,
+    sp_exposed,
+    sp_unexposed
   )
-  
-  denominator_cases <- se_cases + sp_cases - 1
-  denominator_controls <- se_controls + sp_controls - 1
-  
+
+  denominator_exposed <- se_exposed + sp_exposed - 1
+  denominator_unexposed <- se_unexposed + sp_unexposed - 1
+
   corrected_cases_exp <-
-    (a - n_cases * (1 - sp_cases)) / denominator_cases
-  corrected_cases_unexp <- n_cases - corrected_cases_exp
-  corrected_controls_exp <-
-    (c - n_controls * (1 - sp_controls)) / denominator_controls
-  corrected_controls_unexp <- n_controls - corrected_controls_exp
-  
+    (a - n_exposed * (1 - sp_exposed)) / denominator_exposed
+  corrected_controls_exp <- n_exposed - corrected_cases_exp
+
+  corrected_cases_unexp <-
+    (b - n_unexposed * (1 - sp_unexposed)) / denominator_unexposed
+  corrected_controls_unexp <- n_unexposed - corrected_cases_unexp
+
   valid_corrected <-
-    corrected_cases_exp > 0 & corrected_cases_unexp > 0 &
-    corrected_controls_exp > 0 & corrected_controls_unexp > 0 &
-    is.finite(corrected_cases_exp) & is.finite(corrected_cases_unexp) &
-    is.finite(corrected_controls_exp) & is.finite(corrected_controls_unexp)
-  
+    corrected_cases_exp > 0 & corrected_controls_exp > 0 &
+    corrected_cases_unexp > 0 & corrected_controls_unexp > 0 &
+    is.finite(corrected_cases_exp) & is.finite(corrected_controls_exp) &
+    is.finite(corrected_cases_unexp) & is.finite(corrected_controls_unexp)
+
   rejected_corrected <- sum(!valid_corrected)
   draw_id <- draw_id[valid_corrected]
   corrected_cases_exp <- corrected_cases_exp[valid_corrected]
-  corrected_cases_unexp <- corrected_cases_unexp[valid_corrected]
   corrected_controls_exp <- corrected_controls_exp[valid_corrected]
+  corrected_cases_unexp <- corrected_cases_unexp[valid_corrected]
   corrected_controls_unexp <- corrected_controls_unexp[valid_corrected]
-  se_cases <- se_cases[valid_corrected]
-  se_controls <- se_controls[valid_corrected]
-  sp_cases <- sp_cases[valid_corrected]
-  sp_controls <- sp_controls[valid_corrected]
-  
+  se_exposed <- se_exposed[valid_corrected]
+  se_unexposed <- se_unexposed[valid_corrected]
+  sp_exposed <- sp_exposed[valid_corrected]
+  sp_unexposed <- sp_unexposed[valid_corrected]
+
   n_valid_corrected <- length(corrected_cases_exp)
   if (n_valid_corrected == 0L) {
     stop("No valid corrected tables were produced. Check the Se/Sp distributions.",
          call. = FALSE)
   }
-  
-  prev_exp_cases <- stats::rbeta(
-    n_valid_corrected, corrected_cases_exp, corrected_cases_unexp
+
+  prev_disease_exposed <- stats::rbeta(
+    n_valid_corrected, corrected_cases_exp, corrected_controls_exp
   )
-  prev_exp_controls <- stats::rbeta(
-    n_valid_corrected, corrected_controls_exp, corrected_controls_unexp
+  prev_disease_unexposed <- stats::rbeta(
+    n_valid_corrected, corrected_cases_unexp, corrected_controls_unexp
   )
-  
-  ppv_cases <-
-    (se_cases * prev_exp_cases) /
-    (se_cases * prev_exp_cases + (1 - sp_cases) * (1 - prev_exp_cases))
-  ppv_controls <-
-    (se_controls * prev_exp_controls) /
-    (se_controls * prev_exp_controls +
-       (1 - sp_controls) * (1 - prev_exp_controls))
-  npv_cases <-
-    (sp_cases * (1 - prev_exp_cases)) /
-    ((1 - se_cases) * prev_exp_cases + sp_cases * (1 - prev_exp_cases))
-  npv_controls <-
-    (sp_controls * (1 - prev_exp_controls)) /
-    ((1 - se_controls) * prev_exp_controls +
-       sp_controls * (1 - prev_exp_controls))
-  
+
+  ppv_exposed <-
+    (se_exposed * prev_disease_exposed) /
+    (se_exposed * prev_disease_exposed +
+       (1 - sp_exposed) * (1 - prev_disease_exposed))
+  ppv_unexposed <-
+    (se_unexposed * prev_disease_unexposed) /
+    (se_unexposed * prev_disease_unexposed +
+       (1 - sp_unexposed) * (1 - prev_disease_unexposed))
+  npv_exposed <-
+    (sp_exposed * (1 - prev_disease_exposed)) /
+    ((1 - se_exposed) * prev_disease_exposed +
+       sp_exposed * (1 - prev_disease_exposed))
+  npv_unexposed <-
+    (sp_unexposed * (1 - prev_disease_unexposed)) /
+    ((1 - se_unexposed) * prev_disease_unexposed +
+       sp_unexposed * (1 - prev_disease_unexposed))
+
   valid_predictive <-
-    is.finite(ppv_cases) & is.finite(ppv_controls) &
-    is.finite(npv_cases) & is.finite(npv_controls) &
-    ppv_cases >= 0 & ppv_cases <= 1 &
-    ppv_controls >= 0 & ppv_controls <= 1 &
-    npv_cases >= 0 & npv_cases <= 1 &
-    npv_controls >= 0 & npv_controls <= 1
-  
+    is.finite(ppv_exposed) & is.finite(ppv_unexposed) &
+    is.finite(npv_exposed) & is.finite(npv_unexposed) &
+    ppv_exposed >= 0 & ppv_exposed <= 1 &
+    ppv_unexposed >= 0 & ppv_unexposed <= 1 &
+    npv_exposed >= 0 & npv_exposed <= 1 &
+    npv_unexposed >= 0 & npv_unexposed <= 1
+
   rejected_predictive <- sum(!valid_predictive)
   draw_id <- draw_id[valid_predictive]
-  ppv_cases <- ppv_cases[valid_predictive]
-  ppv_controls <- ppv_controls[valid_predictive]
-  npv_cases <- npv_cases[valid_predictive]
-  npv_controls <- npv_controls[valid_predictive]
+  ppv_exposed <- ppv_exposed[valid_predictive]
+  ppv_unexposed <- ppv_unexposed[valid_predictive]
+  npv_exposed <- npv_exposed[valid_predictive]
+  npv_unexposed <- npv_unexposed[valid_predictive]
   corrected_cases_exp <- corrected_cases_exp[valid_predictive]
-  corrected_cases_unexp <- corrected_cases_unexp[valid_predictive]
   corrected_controls_exp <- corrected_controls_exp[valid_predictive]
+  corrected_cases_unexp <- corrected_cases_unexp[valid_predictive]
   corrected_controls_unexp <- corrected_controls_unexp[valid_predictive]
-  se_cases <- se_cases[valid_predictive]
-  se_controls <- se_controls[valid_predictive]
-  sp_cases <- sp_cases[valid_predictive]
-  sp_controls <- sp_controls[valid_predictive]
-  
-  n_valid_predictive <- length(ppv_cases)
+  se_exposed <- se_exposed[valid_predictive]
+  se_unexposed <- se_unexposed[valid_predictive]
+  sp_exposed <- sp_exposed[valid_predictive]
+  sp_unexposed <- sp_unexposed[valid_predictive]
+
+  n_valid_predictive <- length(ppv_exposed)
   if (n_valid_predictive == 0L) {
     stop("No valid PPV/NPV values were produced.", call. = FALSE)
   }
-  
+
   sim_cases_exp <-
-    stats::rbinom(n_valid_predictive, a, ppv_cases) +
-    stats::rbinom(n_valid_predictive, b, 1 - npv_cases)
-  sim_cases_unexp <- n_cases - sim_cases_exp
-  sim_controls_exp <-
-    stats::rbinom(n_valid_predictive, c, ppv_controls) +
-    stats::rbinom(n_valid_predictive, d, 1 - npv_controls)
-  sim_controls_unexp <- n_controls - sim_controls_exp
-  
+    stats::rbinom(n_valid_predictive, a, ppv_exposed) +
+    stats::rbinom(n_valid_predictive, c, 1 - npv_exposed)
+  sim_controls_exp <- n_exposed - sim_cases_exp
+
+  sim_cases_unexp <-
+    stats::rbinom(n_valid_predictive, b, ppv_unexposed) +
+    stats::rbinom(n_valid_predictive, d, 1 - npv_unexposed)
+  sim_controls_unexp <- n_unexposed - sim_cases_unexp
+
   valid_simulated <-
-    sim_cases_exp > 0 & sim_cases_unexp > 0 &
-    sim_controls_exp > 0 & sim_controls_unexp > 0 &
-    is.finite(sim_cases_exp) & is.finite(sim_cases_unexp) &
-    is.finite(sim_controls_exp) & is.finite(sim_controls_unexp)
-  
+    sim_cases_exp > 0 & sim_controls_exp > 0 &
+    sim_cases_unexp > 0 & sim_controls_unexp > 0 &
+    is.finite(sim_cases_exp) & is.finite(sim_controls_exp) &
+    is.finite(sim_cases_unexp) & is.finite(sim_controls_unexp)
+
   rejected_zero_cells <- sum(!valid_simulated)
   sim_data <- tibble(
     draw = draw_id[valid_simulated],
@@ -455,16 +480,17 @@ pba.summary.exp <- function(a, b, c, d,
     sim_cases_unexp = sim_cases_unexp[valid_simulated],
     sim_controls_exp = sim_controls_exp[valid_simulated],
     sim_controls_unexp = sim_controls_unexp[valid_simulated],
-    se_cases = se_cases[valid_simulated],
-    se_controls = se_controls[valid_simulated],
-    sp_cases = sp_cases[valid_simulated],
-    sp_controls = sp_controls[valid_simulated]
+    se_exposed = se_exposed[valid_simulated],
+    se_unexposed = se_unexposed[valid_simulated],
+    sp_exposed = sp_exposed[valid_simulated],
+    sp_unexposed = sp_unexposed[valid_simulated]
   )
+
   if (nrow(sim_data) == 0L) {
     stop("No valid simulated tables remained after zero-cell filtering.",
          call. = FALSE)
   }
-  
+
   eff_syst <- calc_effect(
     sim_data$corrected_cases_exp,
     sim_data$corrected_cases_unexp,
@@ -487,27 +513,31 @@ pba.summary.exp <- function(a, b, c, d,
     effect_measure
   )
   eff_total <- add_random_error(eff_bias, se_bias, effect_measure)
-  
+
   valid_effect <-
     is.finite(eff_syst) & is.finite(eff_bias) &
     is.finite(se_bias) & is.finite(eff_total)
   if (effect_measure %in% c("OR", "RR")) {
     valid_effect <- valid_effect & eff_syst > 0 & eff_bias > 0 & eff_total > 0
   }
+
   rejected_effect <- sum(!valid_effect)
   sim_data <- sim_data[valid_effect, ]
   eff_syst <- eff_syst[valid_effect]
   eff_bias <- eff_bias[valid_effect]
   se_bias <- se_bias[valid_effect]
   eff_total <- eff_total[valid_effect]
-  if (length(eff_total) == 0L) stop("No finite effect draws remained.", call. = FALSE)
-  
+
+  if (length(eff_total) == 0L) {
+    stop("No finite effect draws remained.", call. = FALSE)
+  }
+
   eff_observed <- calc_effect(a, b, c, d, effect_measure)
   se_re_only <- calc_effect_se(a, b, c, d, effect_measure)
   eff_re_only <- add_random_error(
     rep(eff_observed, niter), rep(se_re_only, niter), effect_measure
   )
-  
+
   impossible <- niter - length(eff_total)
   rejection_counts <- tibble(
     Stage = c(
@@ -523,7 +553,7 @@ pba.summary.exp <- function(a, b, c, d,
       rejected_effect
     )
   )
-  
+
   out <- list(
     total = eff_total,
     re = eff_re_only,
@@ -539,7 +569,7 @@ pba.summary.exp <- function(a, b, c, d,
     rejection_counts = rejection_counts,
     bias_draws_all = bias_draws_all,
     bias_draws_valid = sim_data %>%
-      select(draw, se_cases, se_controls, sp_cases, sp_controls),
+      select(draw, se_exposed, se_unexposed, sp_exposed, sp_unexposed),
     effect_draws = tibble(
       draw = sim_data$draw,
       total_error = eff_total,
@@ -552,7 +582,7 @@ pba.summary.exp <- function(a, b, c, d,
     ),
     simulated_tables = sim_data
   )
-  class(out) <- "pba_sim"
+  class(out) <- c("pba_outcome_sim", "pba_sim")
   out
 }
 
@@ -564,7 +594,7 @@ make_pba_table <- function(eff_out, digits = 3) {
   total_q <- stats::quantile(eff_out$total, c(.025, .5, .975), na.rm = TRUE)
   re_q <- stats::quantile(eff_out$re, c(.025, .5, .975), na.rm = TRUE)
   syst_q <- stats::quantile(eff_out$syst, c(.025, .5, .975), na.rm = TRUE)
-  
+
   if (eff_out$effect_measure %in% c("OR", "RR")) {
     width <- c(re_q[3] / re_q[1], syst_q[3] / syst_q[1], total_q[3] / total_q[1])
     width_label <- "Upper/lower ratio"
@@ -572,11 +602,11 @@ make_pba_table <- function(eff_out, digits = 3) {
     width <- c(re_q[3] - re_q[1], syst_q[3] - syst_q[1], total_q[3] - total_q[1])
     width_label <- "Interval width"
   }
-  
+
   med <- c(re_q[2], syst_q[2], total_q[2])
   lo <- c(re_q[1], syst_q[1], total_q[1])
   hi <- c(re_q[3], syst_q[3], total_q[3])
-  
+
   tab <- tibble(
     Analysis = c("Random error only", "Systematic error only", "Total error"),
     Median = round(unname(med), digits),
@@ -632,12 +662,12 @@ ratio_breaks <- function(limits, max_breaks = 7L) {
   keep
 }
 
-# Reflection KDE for a probability on [0,1]. The augmented sample has three
-# copies of each observation, so its density is multiplied by three.
 reflected_probability_density <- function(x, adjust = 1.05, n = 512L) {
   x <- x[is.finite(x) & x >= 0 & x <= 1]
-  if (length(x) < 2L) stop("At least two probability draws are required.", call. = FALSE)
-  
+  if (length(x) < 2L) {
+    stop("At least two probability draws are required.", call. = FALSE)
+  }
+
   x_min <- min(x)
   x_max <- max(x)
   if (x_min == x_max) {
@@ -647,7 +677,7 @@ reflected_probability_density <- function(x, adjust = 1.05, n = 512L) {
   }
   bw <- stats::bw.nrd0(x)
   if (!is.finite(bw) || bw <= 0) bw <- max((x_max - x_min) / 25, 1e-4)
-  
+
   dens <- stats::density(
     c(x, -x, 2 - x),
     bw = bw * adjust,
@@ -669,7 +699,7 @@ make_pba_plot <- function(eff_out,
                           show_labels = TRUE) {
   effect_measure <- eff_out$effect_measure
   effect_name <- full_effect_name(effect_measure)
-  
+
   dat <- tibble(
     Method = c("Random error only", "Systematic error only", "Total error"),
     Estimate = c(median(eff_out$re), median(eff_out$syst), median(eff_out$total)),
@@ -692,41 +722,47 @@ make_pba_plot <- function(eff_out,
         format_effect(Lower, digits), ", ", format_effect(Upper, digits), "]"
       )
     )
-  
+
   null_value <- if (effect_measure %in% c("OR", "RR")) 1 else 0
   x_min <- min(dat$Lower)
   x_max <- max(dat$Upper)
-  
+
   if (effect_measure %in% c("OR", "RR")) {
-    span <- log(x_max / x_min)
+    core_min <- min(x_min, null_value)
+    core_max <- max(x_max, null_value)
+    span <- log(core_max / core_min)
     if (!is.finite(span) || span <= 0) span <- log(1.5)
-    x_lower <- exp(log(x_min) - 0.14 * span)
-    x_upper_data <- exp(log(x_max) + 0.14 * span)
+
+    x_lower <- exp(log(core_min) - 0.14 * span)
+    x_upper_axis <- exp(log(core_max) + 0.14 * span)
     if (show_labels) {
-      label_x <- exp(log(x_max) + 0.22 * span)
-      x_upper <- exp(log(x_max) + max(0.70 * span, log(2.2)))
+      label_x <- exp(log(core_max) + 0.22 * span)
+      x_upper <- exp(log(core_max) + max(0.70 * span, log(2.2)))
     } else {
       label_x <- NA_real_
-      x_upper <- x_upper_data
+      x_upper <- x_upper_axis
     }
-    breaks <- ratio_breaks(c(x_lower, x_upper_data))
+    breaks <- ratio_breaks(c(x_lower, x_upper_axis))
     x_label <- paste0(effect_name, " (log scale)")
   } else {
-    span <- x_max - x_min
+    core_min <- min(x_min, null_value)
+    core_max <- max(x_max, null_value)
+    span <- core_max - core_min
     if (!is.finite(span) || span <= 0) span <- .1
-    x_lower <- x_min - 0.14 * span
-    x_upper_data <- x_max + 0.14 * span
+
+    x_lower <- core_min - 0.14 * span
+    x_upper_axis <- core_max + 0.14 * span
     if (show_labels) {
-      label_x <- x_max + 0.22 * span
-      x_upper <- x_max + 0.75 * span
+      label_x <- core_max + 0.22 * span
+      x_upper <- core_max + 0.75 * span
     } else {
       label_x <- NA_real_
-      x_upper <- x_upper_data
+      x_upper <- x_upper_axis
     }
-    breaks <- scales::breaks_pretty(n = 6)(c(x_lower, x_upper_data))
+    breaks <- scales::breaks_pretty(n = 6)(c(x_lower, x_upper_axis))
     x_label <- effect_name
   }
-  
+
   p <- ggplot(dat, aes(x = Estimate, y = Method)) +
     geom_vline(
       xintercept = null_value, linetype = "22", linewidth = .55, color = "grey30"
@@ -751,15 +787,18 @@ make_pba_plot <- function(eff_out,
     theme(
       panel.grid.major.y = element_blank(),
       axis.text.y = element_text(size = 11),
+      axis.line.x = element_line(color = "grey35", linewidth = .35),
+      axis.ticks.x = element_line(color = "grey35", linewidth = .35),
       plot.margin = margin(12, 34, 8, 12)
     ) +
     coord_cartesian(clip = "off")
-  
+
   if (show_labels) {
-    p <- p +
-      geom_text(aes(x = label_x, label = Label), hjust = 0, size = 3.25)
+    p <- p + geom_text(
+      aes(x = label_x, label = Label), hjust = 0, size = 3.25
+    )
   }
-  
+
   if (effect_measure %in% c("OR", "RR")) {
     p + scale_x_continuous(
       trans = "log10",
@@ -779,7 +818,7 @@ make_pba_plot <- function(eff_out,
 }
 
 # -----------------------------------------------------------------------------
-# Se/Sp parameter plot
+# Outcome-classification parameter plot
 # -----------------------------------------------------------------------------
 
 make_bias_parameter_plot <- function(eff_out,
@@ -789,63 +828,63 @@ make_bias_parameter_plot <- function(eff_out,
                                      show_legend = TRUE) {
   valid_draws <- eff_out$bias_draws_valid
   prior_draws <- eff_out$bias_draws_all
-  
+
   if (nrow(valid_draws) < 2L || nrow(prior_draws) < 2L) {
     stop("Not enough draws for a bias-parameter plot.", call. = FALSE)
   }
   if (is.null(bins)) bins <- choose_hist_bins(nrow(valid_draws))
-  
+
   if (eff_out$misclassification == "nondiff") {
     wide_valid <- valid_draws %>% transmute(
-      `Sensitivity` = se_cases,
-      `Specificity` = sp_cases
+      `Sensitivity` = se_exposed,
+      `Specificity` = sp_exposed
     )
     wide_prior <- prior_draws %>% transmute(
-      `Sensitivity` = se_cases,
-      `Specificity` = sp_cases
+      `Sensitivity` = se_exposed,
+      `Specificity` = sp_exposed
     )
     levels <- c("Sensitivity", "Specificity")
     facet_cols <- 2L
   } else {
     wide_valid <- valid_draws %>% transmute(
-      `Sensitivity: cases` = se_cases,
-      `Sensitivity: controls` = se_controls,
-      `Specificity: cases` = sp_cases,
-      `Specificity: controls` = sp_controls
+      `Sensitivity: exposed` = se_exposed,
+      `Sensitivity: unexposed` = se_unexposed,
+      `Specificity: exposed` = sp_exposed,
+      `Specificity: unexposed` = sp_unexposed
     )
     wide_prior <- prior_draws %>% transmute(
-      `Sensitivity: cases` = se_cases,
-      `Sensitivity: controls` = se_controls,
-      `Specificity: cases` = sp_cases,
-      `Specificity: controls` = sp_controls
+      `Sensitivity: exposed` = se_exposed,
+      `Sensitivity: unexposed` = se_unexposed,
+      `Specificity: exposed` = sp_exposed,
+      `Specificity: unexposed` = sp_unexposed
     )
     levels <- c(
-      "Sensitivity: cases", "Sensitivity: controls",
-      "Specificity: cases", "Specificity: controls"
+      "Sensitivity: exposed", "Sensitivity: unexposed",
+      "Specificity: exposed", "Specificity: unexposed"
     )
     facet_cols <- 2L
   }
-  
+
   long_valid <- wide_valid %>%
     pivot_longer(everything(), names_to = "Parameter", values_to = "Value") %>%
     mutate(Source = "Accepted draws")
   long_prior <- wide_prior %>%
     pivot_longer(everything(), names_to = "Parameter", values_to = "Value") %>%
     mutate(Source = "Prior draws")
-  
+
   long_all <- bind_rows(long_valid, long_prior) %>%
     filter(is.finite(Value), Value >= 0, Value <= 1) %>%
     mutate(
       Parameter = factor(Parameter, levels = levels),
       Source = factor(Source, levels = c("Accepted draws", "Prior draws"))
     )
-  
+
   dens <- long_all %>%
     group_by(Parameter, Source) %>%
     group_modify(~ reflected_probability_density(.x$Value, density_adjust)) %>%
     ungroup()
-  
-  p <- ggplot(filter(long_all, Source == "Accepted draws"), aes(x = Value)) +
+
+  ggplot(filter(long_all, Source == "Accepted draws"), aes(x = Value)) +
     geom_histogram(
       aes(y = after_stat(density)), bins = bins,
       fill = "grey83", color = "white", linewidth = .20
@@ -884,8 +923,6 @@ make_bias_parameter_plot <- function(eff_out,
       legend.margin = margin(0, 0, 0, 0),
       legend.box.margin = margin(0, 0, 4, 0)
     )
-  
-  p
 }
 
 # -----------------------------------------------------------------------------
@@ -893,14 +930,14 @@ make_bias_parameter_plot <- function(eff_out,
 # -----------------------------------------------------------------------------
 
 make_effect_density_plot <- function(eff_out,
-                                     effect_source = c("total", "systematic", "random"),
+                                     effect_source = c("total", "systematic", "random", "bias"),
                                      bins = NULL,
                                      display_quantiles = c(.005, .995),
                                      density_adjust = 1.05) {
   effect_source <- match.arg(effect_source)
   effect_measure <- eff_out$effect_measure
   effect_name <- full_effect_name(effect_measure)
-  
+
   if (length(display_quantiles) != 2L ||
       any(!is.finite(display_quantiles)) ||
       display_quantiles[1] < 0 || display_quantiles[2] > 1 ||
@@ -908,30 +945,33 @@ make_effect_density_plot <- function(eff_out,
     stop("display_quantiles must be two increasing probabilities in [0,1].",
          call. = FALSE)
   }
-  
+
   if (effect_source == "total") {
     eff <- eff_out$total
     source_title <- "Distribution of total-error draws"
   } else if (effect_source == "systematic") {
     eff <- eff_out$syst
     source_title <- "Distribution of systematic-error draws"
-  } else {
+  } else if (effect_source == "random") {
     eff <- eff_out$re
     source_title <- "Distribution of random-error draws"
+  } else {
+    eff <- eff_out$bias_plus_reclassification
+    source_title <- "Distribution before added random error"
   }
-  
+
   dat <- tibble(Effect = eff) %>% filter(is.finite(Effect))
   if (effect_measure %in% c("OR", "RR")) dat <- filter(dat, Effect > 0)
   if (nrow(dat) < 2L) stop("Not enough finite effect draws.", call. = FALSE)
   if (is.null(bins)) bins <- choose_hist_bins(nrow(dat))
-  
+
   q <- quantile(dat$Effect, c(.025, .5, .975))
-  
+
   if (effect_measure %in% c("OR", "RR")) {
     dat <- mutate(dat, PlotValue = log(Effect))
     xlim <- quantile(dat$PlotValue, display_quantiles)
     ticks <- ratio_breaks(exp(xlim))
-    
+
     p <- ggplot(dat, aes(x = PlotValue)) +
       annotate(
         "rect", xmin = log(q[1]), xmax = log(q[3]),
@@ -960,7 +1000,7 @@ make_effect_density_plot <- function(eff_out,
   } else {
     dat <- mutate(dat, PlotValue = Effect)
     xlim <- quantile(dat$PlotValue, display_quantiles)
-    
+
     p <- ggplot(dat, aes(x = PlotValue)) +
       annotate(
         "rect", xmin = q[1], xmax = q[3],
@@ -981,13 +1021,9 @@ make_effect_density_plot <- function(eff_out,
         labels = scales::label_number(accuracy = .01, trim = TRUE),
         expand = expansion(mult = c(0, 0))
       ) +
-      labs(
-        title = source_title,
-        x = effect_name,
-        y = "Density"
-      )
+      labs(title = source_title, x = effect_name, y = "Density")
   }
-  
+
   p +
     scale_y_continuous(
       expand = expansion(mult = c(0, .08)),
@@ -1013,9 +1049,7 @@ pba_results <- function(eff_out, digits = 3, title = NULL) {
       digits = min(digits, 3)
     ),
     parameter_plot = make_bias_parameter_plot(eff_out),
-    distribution_plot = make_effect_density_plot(
-      eff_out, effect_source = "total"
-    ),
+    distribution_plot = make_effect_density_plot(eff_out, effect_source = "total"),
     effect_measure = eff_out$effect_measure,
     n_sims_requested = eff_out$n_sims_requested,
     n_sims_valid = eff_out$n_sims_valid,
@@ -1078,14 +1112,14 @@ plot.pba_results <- function(x,
 
 save_pba_plots <- function(x,
                            directory = ".",
-                           prefix = "pba",
+                           prefix = "pba_outcome",
                            format = c("pdf", "png"),
                            dpi = 320) {
   if (!inherits(x, "pba_results")) stop("x must be a pba_results object.")
   format <- match.arg(format)
   dir.create(directory, recursive = TRUE, showWarnings = FALSE)
   parameter_height <- if (x$misclassification == "nondiff") 4.2 else 6.8
-  
+
   files <- c(
     forest = file.path(directory, paste0(prefix, "_forest.", format)),
     parameters = file.path(directory, paste0(prefix, "_parameters.", format)),
@@ -1104,20 +1138,21 @@ save_pba_plots <- function(x,
 # Example
 # -----------------------------------------------------------------------------
 
-
-draws.out <- pba.summary.exp(
-  a = 641,
-  b = 2084,
-  c = 2047,
-  d = 9348,
-  se1.a = 17,
-  se1.b = 1,
-  se0.a = 893,
-  se0.b = 87,
-  sp1.a = 20,
-  sp1.b = 2,
-  sp0.a = 1266,
-  sp0.b = 74,
+draws.out <- pba.summary.out(
+  a = 40,
+  b = 20,
+  c = 60,
+  d = 80,
+  se1.a = 254,
+  se1.b = 24,
+  se0.a = 450,
+  se0.b = 67,
+  # The Sp beta distributions below approximately moment-match the
+  # trapezoidal distributions used in the earlier version of this example.
+  sp1.a = 168.392,
+  sp1.b = 5.208,
+  sp0.a = 591.431,
+  sp0.b = 47.954,
   type = "diff(.80)",
   effect_measure = "RR",
   SIMS = 100000
@@ -1133,5 +1168,5 @@ plot(results, which = "parameters")
 plot(results, which = "distribution")
 
 # Recommended publication export:
-# save_pba_plots(results, "figures", prefix = "rr_pba", format = "pdf")
-# save_pba_plots(results, "figures", prefix = "rr_pba", format = "png")
+# save_pba_plots(results, "figures", prefix = "rr_outcome_pba", format = "pdf")
+# save_pba_plots(results, "figures", prefix = "rr_outcome_pba", format = "png")
