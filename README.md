@@ -11,7 +11,7 @@ Treat all code as preliminary until this readme file calls it final
 Code to date -
 
 1. Summary level exposure misclassification adjustment
-File: summary_exposure misclass.r
+File: summary_exposure_misclass.r
 Version: 1
 Version Date: 7_29_26
 Checks: preliminary checks vs spreadsheet and old code - passed
@@ -31,4 +31,35 @@ Checks: preliminary checks vs old code - passed
 File: summary_outcome_cact.r
 Version Date: 8_01_26
 Checks: preliminary checks vs old code - passed
+
+5. Record level exposure misclassification
+File: record_exposure_misclassification.r
+Version Date: 8_01_26
+checks: preliminary check vs old code - passed
+
+6. Record level exposure misclassification - Fast implementation
+File: record_exposure_misclassification_fast.r
+Version Date: 8_01_26
+checks: none
+
+7. Record level outcome misclassification
+File: record_outcome_misclassification.r
+Version Date: 8_01_26
+checks: none yet
+
+8. Record level outcome misclassification-fast
+File: record_outcome_misclassification.r
+Version Date: 8_01_26
+checks: none yet
+
+9. Record level uncontrolled confounder adjustment
+File: record_uncontrolled_confounding.r
+Version Date: 8_01_26
+checks: preliminary check vs old code - passed
+
+10. Record level uncontrolled confounder adjustment - fast
+File: record_uncontrolled_confounding.r
+Version Date: 8_01_26
+checks: none
+
 
