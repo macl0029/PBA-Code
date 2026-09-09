@@ -11,10 +11,12 @@ Treat all code as preliminary until this readme file calls it final
 Code to date -
 
 1. Summary level exposure misclassification adjustment
-File: summary_exposure_misclass.r
-Version: 1
-Version Date: 7_29_26
+R File: summary_exposure_misclass.r
+Stata File: summary_exposure_misclass.do
+Version: 2
+Version Date: 9_9_26
 Checks: preliminary checks vs spreadsheet and old code - passed
+Checks: compared across wide variety of options to Stata and excel - passed
 
 2. Summary level uncontrolled confounding adjustment
 File: summary_confounding.R
